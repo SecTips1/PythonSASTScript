@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+
+import os
+import re
+import requests
+import sys
+import pkg_resources
+
+# ------------------------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------------------------
+# You can add or modify patterns as needed.
+
+SUSPICIOUS_PATTERNS = {
+    "Hardcoded credentials": [
+        r"(api_key\s*=\s*['\"][0-9A-Za-z]+['\"])",  # e.g., api_key='XYZ'
+        r"(password\s*=\s*['\"][^'\"]+['\"])",      # e.g., password="secret"
+        r"(secret\s*=\s*['\"][^'\"]+['\"])",        # e.g., secret='topsecret'
+    ],
+    "Insecure function calls": [
+        r"\beval\(",
+        r"\bexec\(",
+        r"\bos\.system\(",
+        r"\bos\.popen\(",
+        r"\bsubprocess\.popen\(",
+        r"\bsubprocess\.call\(",
+    ],
+}
+
+# Files with these extensions will be scanned for suspicious patterns:
+CODE_EXTENSIONS = {".py", ".js", ".ts", ".php", ".sh", ".rb", ".java", ".c", ".cpp", ".cs"}
+
+# Requirements files to check for outdated libraries:
+REQUIREMENTS_FILES = ["requirements.txt"]
+
+
+# ------------------------------------------------------------------------------
+# UTILITY FUNCTIONS
+# ------------------------------------------------------------------------------
+def is_code_file(filename):
+    return any(filename.endswith(ext) for ext in CODE_EXTENSIONS)
+
+def find_suspicious_lines_in_file(filepath):
+    """
+    Returns a dictionary {pattern_name: [(line_number, line_content), ...], ...}
+    if any suspicious lines match the configured regex patterns.
+    """
+    results = {}
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+        for line_num, line_content in enumerate(f, start=1):
+            for pattern_name, regex_list in SUSPICIOUS_PATTERNS.items():
+                for regex in regex_list:
+                    if re.search(regex, line_content):
+                        if pattern_name not in results:
+                            results[pattern_name] = []
+                        results[pattern_name].append((line_num, line_content.strip()))
+    return results
+
+def check_outdated_libraries(requirements_file):
+    """
+    Checks each library in the given requirements file against PyPI.
+    Returns a list of tuples (library, current_version, latest_version).
+    """
+    outdated = []
+    if not os.path.exists(requirements_file):
+        return outdated
+    
+    with open(requirements_file, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Parse library name and version
+            # e.g., "flask==2.0.1"
+            lib_info = line.split("==")
+            if len(lib_info) == 2:
+                lib_name, current_version = lib_info
+                lib_name = lib_name.strip()
+                current_version = current_version.strip()
+                latest_version = get_latest_version(lib_name)
+                if latest_version and is_version_outdated(current_version, latest_version):
+                    outdated.append((lib_name, current_version, latest_version))
+    return outdated
+
+def get_latest_version(package_name):
+    """
+    Fetches the latest version from PyPI.
+    Returns None if it fails or package is not found.
+    """
+    url = f"https://pypi.org/pypi/{package_name}/json"
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data["info"]["version"]
+    except Exception as e:
+        print(f"Error fetching version info for {package_name}: {e}")
+    return None
+
+def is_version_outdated(current_version, latest_version):
+    """
+    Compares two version strings using pkg_resources.parse_version
+    Returns True if current_version < latest_version.
+    """
+    return pkg_resources.parse_version(current_version) < pkg_resources.parse_version(latest_version)
+
+# ------------------------------------------------------------------------------
+# MAIN SCANNER
+# ------------------------------------------------------------------------------
+def scan_codebase(root_path):
+    """
+    Recursively scan the codebase under root_path for suspicious patterns.
+    """
+    overall_results = {}
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        # Skip hidden directories like .git, .venv, node_modules, etc.
+        # You can customize this list as needed:
+        if any(hidden in dirpath for hidden in [".git", ".venv", "node_modules"]):
+            continue
+
+        for file in filenames:
+            if is_code_file(file):
+                filepath = os.path.join(dirpath, file)
+                findings = find_suspicious_lines_in_file(filepath)
+                if findings:
+                    overall_results[filepath] = findings
+    return overall_results
+
+def main():
+    # 1. Scan for suspicious patterns
+    repo_path = os.path.abspath(".")  # default to current directory
+    print(f"[*] Scanning codebase under: {repo_path}")
+    results = scan_codebase(repo_path)
+
+    if not results:
+        print("[+] No suspicious patterns found!")
+    else:
+        print("[-] Suspicious patterns detected in the following files:")
+        for filepath, patterns in results.items():
+            print(f"  File: {filepath}")
+            for pattern_name, lines in patterns.items():
+                print(f"    {pattern_name}:")
+                for line_num, content in lines:
+                    print(f"      Line {line_num}: {content}")
+        print()
+
+    # 2. Check for outdated libraries
+    for req_file in REQUIREMENTS_FILES:
+        req_path = os.path.join(repo_path, req_file)
+        if os.path.isfile(req_path):
+            print(f"[*] Checking {req_file} for outdated libraries...")
+            outdated = check_outdated_libraries(req_path)
+            if outdated:
+                print("[-] Outdated libraries found:")
+                for lib_name, current_version, latest_version in outdated:
+                    print(f"    {lib_name}: {current_version} (latest: {latest_version})")
+            else:
+                print(f"[+] All libraries in {req_file} are up to date.")
+        else:
+            print(f"[!] {req_file} not found. Skipping outdated library check.")
+    
+    print("\n[!] Scan complete. Remember this is a basic script—use robust security tools as well!")
+
+if __name__ == "__main__":
+    main()
